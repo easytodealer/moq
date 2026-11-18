@@ -21,7 +21,6 @@
 #include <obs-module.h>
 
 #include "moq-audio-encoder.h"
-#include "moq-opus-bitrates.h"
 #include "moq-test-relay.h"
 
 // libobs keeps these opaque, so the test gives them the shape its stubs need.
@@ -38,20 +37,9 @@ struct obs_encoder {
 	audio_output *audio = nullptr;
 };
 
-struct obs_property {
-	std::string name;
-	obs_property_type type = OBS_PROPERTY_INVALID;
-	std::vector<long long> ints;
-};
-
-struct obs_properties {
-	std::vector<obs_property> items;
-};
-
 namespace {
 obs_encoder_info g_info{};
 int g_registered = 0;
-obs_properties g_props;
 } // namespace
 
 extern "C" {
@@ -85,68 +73,6 @@ void obs_data_set_default_string(obs_data_t *settings, const char *name, const c
 {
 	if (strcmp(name, "preset") == 0)
 		settings->preset = value;
-}
-
-obs_properties_t *obs_properties_create(void)
-{
-	g_props.items.clear();
-	return &g_props;
-}
-
-static obs_property *Add(obs_properties_t *props, const char *name, obs_property_type type)
-{
-	props->items.push_back(obs_property{});
-	obs_property &item = props->items.back();
-	item.name = name ? name : "";
-	item.type = type;
-	return &item;
-}
-
-obs_property_t *obs_properties_add_list(obs_properties_t *props, const char *name, const char *, enum obs_combo_type,
-					enum obs_combo_format)
-{
-	return reinterpret_cast<obs_property_t *>(Add(props, name, OBS_PROPERTY_LIST));
-}
-
-size_t obs_property_list_add_int(obs_property_t *prop, const char *, long long val)
-{
-	auto *item = reinterpret_cast<obs_property *>(prop);
-	item->ints.push_back(val);
-	return item->ints.size() - 1;
-}
-
-size_t obs_property_list_add_string(obs_property_t *, const char *, const char *)
-{
-	return 0;
-}
-
-obs_property_t *obs_properties_get(obs_properties_t *props, const char *name)
-{
-	for (obs_property &item : props->items) {
-		if (item.name == name)
-			return reinterpret_cast<obs_property_t *>(&item);
-	}
-	return nullptr;
-}
-
-enum obs_property_type obs_property_get_type(obs_property_t *prop)
-{
-	return prop ? reinterpret_cast<obs_property *>(prop)->type : OBS_PROPERTY_INVALID;
-}
-
-size_t obs_property_list_item_count(obs_property_t *prop)
-{
-	return reinterpret_cast<obs_property *>(prop)->ints.size();
-}
-
-long long obs_property_list_item_int(obs_property_t *prop, size_t idx)
-{
-	return reinterpret_cast<obs_property *>(prop)->ints.at(idx);
-}
-
-bool obs_property_list_item_disabled(obs_property_t *, size_t)
-{
-	return false;
 }
 
 audio_t *obs_encoder_audio(const obs_encoder_t *encoder)
@@ -390,17 +316,8 @@ int main()
 	CHECK(strcmp(g_info.id, "moq_opus") == 0);
 	CHECK(strcmp(g_info.codec, "opus") == 0);
 	CHECK(g_info.type == OBS_ENCODER_AUDIO);
-	// OBS 32.1.2 用 get_properties 枚举码率，结构体里没有 get_bitrate。
-	CHECK(g_info.get_properties != nullptr);
-	obs_properties_t *props = g_info.get_properties(nullptr);
-	CHECK(props != nullptr);
-	obs_property_t *bitrate = obs_properties_get(props, "bitrate");
-	CHECK(bitrate != nullptr);
-	CHECK(obs_property_get_type(bitrate) == OBS_PROPERTY_LIST);
-	CHECK(obs_property_list_item_count(bitrate) == 1);
-	const int listed = static_cast<int>(obs_property_list_item_int(bitrate, 0));
-	CHECK(listed == MoqOpusStartupEnumerationKbps());
-	CHECK(!MoqOpusBitrateOnFfmpegGrid(listed));
+	// 不提供 get_properties。OBS 32.1.2 因此会打码率枚举告警，但不会改简单输出的码率表。
+	CHECK(g_info.get_properties == nullptr);
 	// Hidden from OBS's encoder lists until Use MoQ encoders offers it.
 	CHECK(g_info.caps & OBS_ENCODER_CAP_INTERNAL);
 	printf("registers an internal Opus encoder: ok\n");

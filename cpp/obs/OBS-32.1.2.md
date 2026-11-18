@@ -89,17 +89,22 @@ OBS 合成画面是新像素，必须再编码。插件在认识的编码器上�
 - `token_file`：属主可读的订阅 JWT 文件。正文不写入场景，日志只记路径和拒绝原因。
 - `tls_server_name`：空则按 URL 主机校验，IP SAN 走这个主机。填了就用它替换校验名，不能是 `*`。
 
-任一有值就进入严格订阅。缺另一项、不是 `https`、URL 自带 `jwt` 或 userinfo、PEM 不是证书、token 文件组可读或是符号链接、载荷带 publish，都直接拒绝，不拨号。通过时版本只有 `moq-transport-22`，WebSocket 关闭，token 只放进 `ClientConfig::tokens` 一次。URL 的 path 和 `broadcast` 不拼接。
+三个新属性都空着时，源保持这次改动之前的库默认：可以协商 moq-lite，WebSocket 仍按库默认，也不要求本地 CA。旧的 `url` / `broadcast` / `quic_keylog` 场景因此不用改。
 
-威胁模型：场景 JSON 和 OBS 撤销栈不适合放 JWT。这个文件门闩挡的是误把 token 放进场景，以及同机其他用户直接读文件。它不是钥匙串。能读该文件的进程仍能读到 token。未验签的载荷检查只防止订阅读源误用一枚写明可发布的 token；中继仍要验签。握手和出画没有在这台云主机上做过。
+任一有值就进入严格订阅。缺另一项、不是 `https`、URL 自带 `jwt` 或 userinfo、PEM 解不出 X.509 证书或夹着私钥、token 文件空、不是 JWT、不是属主且模式含组/其他读、是符号链接、读的过程中变了、超过 16 KiB、未验签载荷写了 publish，都直接拒绝，不拨号。通过时版本只有 `moq-transport-22`，WebSocket 关闭，`insecure` 和系统根都是关，token 只放进 `ClientConfig::tokens` 一次。URL 的 path 和 `broadcast` 不拼接。`tls_server_name` 为空就校验 URL 主机；填了就只校验这一个名字。IP 覆盖名必须等于 URL 主机。通配符不行。
+
+威胁模型：场景 JSON 不放 JWT。错误和描述字符串不带 token 正文，也不带 token 文件路径。打开用 `O_NOFOLLOW`，权限看的是这个 fd 的 `fstat`，所以路径在打开之后被换成别的文件不会读到新 inode。这不是钥匙串。能读该文件的进程仍能读到 token。载荷里的 publish/subscribe 检查没有验签，只用来拒绝明显配错的文件；中继仍要验证签名和授权。握手和出画没有在这台云主机上做过。
 
 ## Opus 启动告警
 
-OBS 32.1.2 的 `frontend/utility/audio-encoders.cpp` 枚举每一个音频编码器，包括带 `OBS_ENCODER_CAP_INTERNAL` 的。`obs_encoder_info` 没有 `get_bitrate`。它调用 `get_properties(NULL)`，再读名为 `bitrate` 的 INT 或 LIST。`moq_opus` 以前没有 `get_properties`，所以先报 `Failed to get properties for encoder 'MoQ Opus' (moq_opus)`，列表空了再报 `Could not enumerate moq_opus encoder bitrates`。
+OBS 32.1.2 的 `obs_encoder_info` 没有 `get_bitrate`。`frontend/utility/audio-encoders.cpp` 对每个音频编码器，包括 `OBS_ENCODER_CAP_INTERNAL`，调用 `get_properties(NULL)`，再读名为 `bitrate` 的 INT 或 LIST。`moq_opus` 没有这个回调，所以启动时仍会打两行：
 
-这只影响输出编码器在启动时的码率表。MoQ 源的 Opus 解码走 `moq::AudioConsumer`，不经过 `moq_opus`。
+- `Failed to get properties for encoder 'MoQ Opus' (moq_opus)`
+- `Could not enumerate moq_opus encoder bitrates`
 
-`ffmpeg_opus` 的码率是 64 到 1024、步长 32。简单输出会把后注册的 Opus 编码器报出的这些值改接过去。`moq_opus` 因此只在枚举列表里放 6 kbit/s，这个值不在该网格上。真正编码仍读 settings 里的 `bitrate`，默认 128。输入解码语义没改。
+这只发生在输出编码器的码率表扫描。源的 Opus 解码走 `moq::AudioConsumer`，不经过 `moq_opus`。编码器自己的默认值仍是 `get_defaults` 里的 128，扫描不会改它。
+
+`ffmpeg_opus` 报的是 64 到 1024、步长 32。简单输出先把这些值记到 `ffmpeg_opus`，再让每个 `codec == "opus"` 的编码器覆盖自己报出的值。插件在 FFmpeg 之后加载。若 `moq_opus` 报出同一网格，`GetSimpleOpusEncoderForBitrate(128)` 会变成 `moq_opus`，简单输出就会去创建它。若只报 6，128 仍留在 `ffmpeg_opus`，但简单输出的下拉框会多一个 6 kbit/s，而且这个列表里没有编码器自己的默认 128。两种都改变 OBS 的选择，所以不设置 `get_properties`。告警还在，码率选择不改。
 
 ## 重建
 

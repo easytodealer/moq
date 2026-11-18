@@ -228,8 +228,8 @@ inline bool SkipValue(const std::string &s, size_t &i)
 	return ValueNonEmpty(s, i, unused);
 }
 
-// 未验签。只拒绝本地文件里已经写明带有 publish 授权的载荷，避免订阅读源误用发布 token。
-// 中继仍负责验签。签名与载荷不一致时，中继会拒绝，这里不会把它改写成另一枚 token。
+// 只看未验签的载荷，用来拦住明显写了 publish 的文件。通过不等于 token 真实或只可订阅。
+// 签名、过期和路径授权由中继校验。这里不改写 token。
 inline bool SubscribeOnlyPayload(const std::string &json, std::string &error)
 {
 	size_t i = 0;
@@ -289,11 +289,11 @@ inline bool SubscribeOnlyPayload(const std::string &json, std::string &error)
 		return false;
 	}
 	if (publish_nonempty) {
-		error = "subscribe token file grants publish; this source only accepts a subscribe grant";
+		error = "unverified payload grants publish; this source will not send it. The relay still verifies the signature";
 		return false;
 	}
 	if (!saw_subscribe || !subscribe_nonempty) {
-		error = "subscribe token file does not grant subscribe";
+		error = "unverified payload does not grant subscribe. The relay still verifies the signature";
 		return false;
 	}
 	return true;
@@ -301,6 +301,10 @@ inline bool SubscribeOnlyPayload(const std::string &json, std::string &error)
 
 inline bool ClassifyToken(const std::string &token, std::string &error)
 {
+	if (token.empty()) {
+		error = "subscribe token file is empty";
+		return false;
+	}
 	const size_t first = token.find('.');
 	const size_t second = first == std::string::npos ? std::string::npos : token.find('.', first + 1);
 	if (first == std::string::npos || second == std::string::npos || token.find('.', second + 1) != std::string::npos ||
@@ -346,10 +350,10 @@ inline bool ReadFile(const std::string &path, bool secret, std::string &body, st
 		error = std::string(what) + " path is too long";
 		return false;
 	}
-	const int flags = secret ? (O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : (O_RDONLY | O_CLOEXEC);
-	const int fd = open(path.c_str(), flags);
+	// 打开时就拒绝符号链接，随后只 fstat 这个 fd。路径被换掉不会换成另一个 inode。
+	const int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
 	if (fd < 0) {
-		if (secret && errno == ELOOP)
+		if (errno == ELOOP)
 			error = std::string(what) + " must not be a symlink";
 		else
 			error = std::string("cannot open ") + what;
@@ -366,23 +370,25 @@ inline bool ReadFile(const std::string &path, bool secret, std::string &body, st
 		error = std::string(what) + " must be a regular file";
 		return false;
 	}
-	if (secret && (st.st_mode & 077) != 0) {
+	if (secret && (st.st_uid != getuid() || (st.st_mode & 077) != 0)) {
 		close(fd);
-		error = std::string(what) + " must not be readable by group or others";
+		error = std::string(what) + " must be owned by this user and not readable by group or others";
 		return false;
 	}
-	if (st.st_size < 0 || st.st_size > 16384) {
+	if (st.st_size <= 0 || st.st_size > 16384) {
 		close(fd);
-		error = std::string(what) + " is larger than 16 KiB";
+		error = st.st_size <= 0 ? std::string(what) + " is empty" : std::string(what) + " is larger than 16 KiB";
 		return false;
 	}
-	body.assign(static_cast<size_t>(st.st_size), '\0');
+	const auto expected = static_cast<size_t>(st.st_size);
+	body.assign(expected, '\0');
 	size_t got = 0;
-	while (got < body.size()) {
-		const ssize_t n = read(fd, body.data() + got, body.size() - got);
+	while (got < expected) {
+		const ssize_t n = read(fd, body.data() + got, expected - got);
 		if (n < 0) {
 			close(fd);
 			body.assign(body.size(), '\0');
+			body.clear();
 			error = std::string("cannot read ") + what;
 			return false;
 		}
@@ -390,29 +396,71 @@ inline bool ReadFile(const std::string &path, bool secret, std::string &body, st
 			break;
 		got += static_cast<size_t>(n);
 	}
+	struct stat again;
+	const bool changed = fstat(fd, &again) != 0 || again.st_size != st.st_size || again.st_ino != st.st_ino;
 	close(fd);
-	body.resize(got);
+	if (changed || got != expected) {
+		body.assign(body.size(), '\0');
+		body.clear();
+		error = std::string(what) + " changed while reading";
+		return false;
+	}
 	return true;
+}
+
+inline bool DerSequence(const std::string &der)
+{
+	if (der.size() < 2 || static_cast<unsigned char>(der[0]) != 0x30)
+		return false;
+	size_t hdr = 2;
+	size_t len = static_cast<unsigned char>(der[1]);
+	if (static_cast<unsigned char>(der[1]) & 0x80) {
+		const size_t nbytes = static_cast<unsigned char>(der[1]) & 0x7f;
+		if (nbytes == 0 || nbytes > 3 || der.size() < 2 + nbytes)
+			return false;
+		len = 0;
+		for (size_t i = 0; i < nbytes; i++)
+			len = (len << 8) | static_cast<unsigned char>(der[2 + i]);
+		hdr = 2 + nbytes;
+	}
+	if (hdr + len != der.size() || len < 2)
+		return false;
+	return static_cast<unsigned char>(der[hdr]) == 0x30;
 }
 
 inline bool PemHasCertificate(const std::string &body)
 {
+	if (body.find("PRIVATE KEY") != std::string::npos)
+		return false;
 	const std::string begin = "-----BEGIN CERTIFICATE-----";
 	const std::string end = "-----END CERTIFICATE-----";
-	const size_t at = body.find(begin);
-	if (at == std::string::npos)
-		return false;
-	const size_t stop = body.find(end, at + begin.size());
-	if (stop == std::string::npos)
-		return false;
-	std::string b64;
-	for (size_t i = at + begin.size(); i < stop; i++) {
-		const unsigned char c = static_cast<unsigned char>(body[i]);
-		if (!std::isspace(c))
+	size_t cursor = 0;
+	bool any = false;
+	while (cursor < body.size()) {
+		const size_t at = body.find(begin, cursor);
+		if (at == std::string::npos)
+			return any;
+		const size_t stop = body.find(end, at + begin.size());
+		if (stop == std::string::npos)
+			return false;
+		std::string b64;
+		for (size_t i = at + begin.size(); i < stop; i++) {
+			const unsigned char c = static_cast<unsigned char>(body[i]);
+			if (std::isspace(c))
+				continue;
+			if (c == '=')
+				continue;
+			if (B64(static_cast<char>(c)) < 0)
+				return false;
 			b64.push_back(static_cast<char>(c));
+		}
+		std::string der;
+		if (!Base64Url(b64, der) || !DerSequence(der))
+			return false;
+		any = true;
+		cursor = stop + end.size();
 	}
-	std::string der;
-	return Base64Url(b64, der) && der.size() > 32;
+	return any;
 }
 
 inline std::string HostOf(const std::string &url, std::string &error)
@@ -458,16 +506,80 @@ inline std::string SchemeOf(const std::string &url)
 	return out;
 }
 
-inline bool ServerNameOk(const std::string &name)
+inline bool IsIPv4(const std::string &name)
 {
-	if (name.empty() || name.size() > 255 || name == "*" || name.find('*') != std::string::npos)
-		return false;
-	if (name.find("://") != std::string::npos || name.find('/') != std::string::npos ||
-	    name.find('?') != std::string::npos || name.find('@') != std::string::npos)
-		return false;
-	for (unsigned char c : name) {
-		if (std::isspace(c) || c < 0x20)
+	int dots = 0;
+	int group = -1;
+	for (char c : name) {
+		if (c == '.') {
+			if (group < 0 || group > 255)
+				return false;
+			dots++;
+			group = -1;
+			continue;
+		}
+		if (c < '0' || c > '9')
 			return false;
+		group = (group < 0 ? 0 : group * 10) + (c - '0');
+		if (group > 255)
+			return false;
+	}
+	return dots == 3 && group >= 0 && group <= 255;
+}
+
+inline bool IsDnsName(const std::string &name)
+{
+	if (name.empty() || name.size() > 253 || name.front() == '.' || name.back() == '.')
+		return false;
+	size_t label = 0;
+	bool hyphen = false;
+	for (char c : name) {
+		if (c == '.') {
+			if (label == 0 || hyphen)
+				return false;
+			label = 0;
+			hyphen = false;
+			continue;
+		}
+		const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+		if (!ok || label >= 63)
+			return false;
+		if (label == 0 && c == '-')
+			return false;
+		hyphen = c == '-';
+		label++;
+	}
+	return label > 0 && !hyphen;
+}
+
+// 空覆盖名表示校验 URL 主机，包括 IP SAN。非空则只校验这一个名字，不额外再校验 URL 主机，
+// 也不关闭校验。IP 覆盖名必须就是 URL 里的那个地址。DNS 覆盖名可以替换 IP 主机，证书必须签这个名字。
+inline bool ServerNameAllowed(const std::string &url_host, const std::string &override_name, std::string &error)
+{
+	if (override_name.empty())
+		return true;
+	if (override_name.find('*') != std::string::npos || override_name.find("://") != std::string::npos ||
+	    override_name.find('/') != std::string::npos || override_name.find('?') != std::string::npos ||
+	    override_name.find('@') != std::string::npos) {
+		error = "server name override is not a single hostname";
+		return false;
+	}
+	for (unsigned char c : override_name) {
+		if (std::isspace(c) || c < 0x20) {
+			error = "server name override is not a single hostname";
+			return false;
+		}
+	}
+	if (IsIPv4(override_name)) {
+		if (override_name != url_host) {
+			error = "IP server name override must match the URL host";
+			return false;
+		}
+		return true;
+	}
+	if (!IsDnsName(override_name)) {
+		error = "server name override is not a hostname";
+		return false;
 	}
 	return true;
 }
@@ -507,13 +619,10 @@ inline Dial Prepare(const Input &in)
 		dial.error = host_error;
 		return dial;
 	}
-	if (!in.server_name.empty()) {
-		if (!ServerNameOk(in.server_name)) {
-			dial.error = "server name override is not a hostname";
-			return dial;
-		}
+	if (!ServerNameAllowed(host, in.server_name, dial.error))
+		return dial;
+	if (!in.server_name.empty())
 		dial.server_name = in.server_name;
-	}
 
 	std::string pem;
 	if (!ReadFile(in.tls_root, false, pem, dial.error, "CA PEM"))
@@ -529,6 +638,10 @@ inline Dial Prepare(const Input &in)
 	if (!ReadFile(in.token_file, true, token, dial.error, "subscribe token file"))
 		return dial;
 	Trim(token);
+	if (token.empty()) {
+		dial.error = "subscribe token file is empty";
+		return dial;
+	}
 	if (!ClassifyToken(token, dial.error)) {
 		token.assign(token.size(), '\0');
 		return dial;

@@ -183,9 +183,63 @@ int main()
 	}
 
 	{
+		WriteFile(dir + "/empty", "", 0600);
+		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", root, dir + "/empty", ""});
+		CHECK(!dial);
+		CHECK(dial.error.find("empty") != std::string::npos);
+	}
+	{
+		WriteFile(dir + "/blank", " \n\t", 0600);
+		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", root, dir + "/blank", ""});
+		CHECK(!dial);
+		CHECK(dial.error.find("empty") != std::string::npos);
+	}
+	{
+		WriteFile(dir + "/bad", "not-a-jwt", 0600);
+		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", root, dir + "/bad", ""});
+		CHECK(!dial);
+		CHECK(dial.error.find("JWT") != std::string::npos);
+		CHECK(dial.error.find(dir) == std::string::npos);
+	}
+	{
+		const std::string junk = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+		WriteFile(dir + "/junk.pem", junk, 0644);
+		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", dir + "/junk.pem", token_path, ""});
+		CHECK(!dial);
+		CHECK(dial.error.find("certificate") != std::string::npos);
+	}
+	{
+		WriteFile(dir + "/key.pem", "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n", 0600);
+		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", dir + "/key.pem", token_path, ""});
+		CHECK(!dial);
+		CHECK(dial.error.find("certificate") != std::string::npos);
+	}
+	{
+		WriteFile(dir + "/big", std::string(16385, 'a'), 0600);
+		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", root, dir + "/big", ""});
+		CHECK(!dial);
+		CHECK(dial.error.find("16 KiB") != std::string::npos);
+		CHECK(dial.error.find(dir) == std::string::npos);
+	}
+	{
 		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", root, token_path, "*"});
 		CHECK(!dial);
 		CHECK(dial.error.find("hostname") != std::string::npos);
+	}
+	{
+		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", root, token_path, "10.0.0.1"});
+		CHECK(!dial);
+		CHECK(dial.error.find("URL host") != std::string::npos);
+	}
+	{
+		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", root, token_path, "10.244.144.10"});
+		CHECK(dial);
+		CHECK(dial.server_name && *dial.server_name == "10.244.144.10");
+		CHECK(dial.insecure == false);
+		CHECK(dial.system_roots && *dial.system_roots == false);
+		const std::string described = MoQSourceAuth::Describe(dial);
+		CHECK(described.find(subscribe) == std::string::npos);
+		CHECK(described.find(token_path) == std::string::npos);
 	}
 
 	{
