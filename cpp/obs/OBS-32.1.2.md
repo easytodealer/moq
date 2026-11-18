@@ -79,10 +79,38 @@ MSF（`.msf`，draft-ietf-moq-msf-01，外加 CMAF packaging）在 **moq-cli 0.1
 
 OBS 合成画面是新像素，必须再编码。插件在认识的编码器上关掉 B 帧，并把关键帧间隔压到不超过 2 秒。OBS 32.1.2 的 `plugins/mac-videotoolbox/encoder.c` 会把 `kVTCompressionPropertyKey_RealTime` 设成 false，也没有设置 `EnableLowLatencyRateControl`。`bframes=false` 只对应 `AllowFrameReordering`。这是 OBS 自带编码器的行为，本改动没有改 OBS。不能把它写成已经打开了 Apple 的低延迟码控。
 
+## 源的应用内 CA 和订阅 token
+
+`moq_source` 以前只暴露 `url`、`broadcast`、`quic_keylog`，拨号用库默认：可以协商 moq-lite，WebSocket 默认开启，没有指定根证书时走系统根。FFI 的 `ClientConfig` 已经能表达应用内 PEM、`system_roots=false`、单一 token、版本列表和关闭 WebSocket。缺的是源没有把这些交出去。
+
+三个新属性默认都是空字符串，所以旧场景仍走原来的库默认：
+
+- `tls_root`：只信任这一份 CA PEM，不读系统证书库，也不打开 insecure。
+- `token_file`：属主可读的订阅 JWT 文件。正文不写入场景，日志只记路径和拒绝原因。
+- `tls_server_name`：空则按 URL 主机校验，IP SAN 走这个主机。填了就用它替换校验名，不能是 `*`。
+
+任一有值就进入严格订阅。缺另一项、不是 `https`、URL 自带 `jwt` 或 userinfo、PEM 不是证书、token 文件组可读或是符号链接、载荷带 publish，都直接拒绝，不拨号。通过时版本只有 `moq-transport-22`，WebSocket 关闭，token 只放进 `ClientConfig::tokens` 一次。URL 的 path 和 `broadcast` 不拼接。
+
+威胁模型：场景 JSON 和 OBS 撤销栈不适合放 JWT。这个文件门闩挡的是误把 token 放进场景，以及同机其他用户直接读文件。它不是钥匙串。能读该文件的进程仍能读到 token。未验签的载荷检查只防止订阅读源误用一枚写明可发布的 token；中继仍要验签。握手和出画没有在这台云主机上做过。
+
+## Opus 启动告警
+
+OBS 32.1.2 的 `frontend/utility/audio-encoders.cpp` 枚举每一个音频编码器，包括带 `OBS_ENCODER_CAP_INTERNAL` 的。`obs_encoder_info` 没有 `get_bitrate`。它调用 `get_properties(NULL)`，再读名为 `bitrate` 的 INT 或 LIST。`moq_opus` 以前没有 `get_properties`，所以先报 `Failed to get properties for encoder 'MoQ Opus' (moq_opus)`，列表空了再报 `Could not enumerate moq_opus encoder bitrates`。
+
+这只影响输出编码器在启动时的码率表。MoQ 源的 Opus 解码走 `moq::AudioConsumer`，不经过 `moq_opus`。
+
+`ffmpeg_opus` 的码率是 64 到 1024、步长 32。简单输出会把后注册的 Opus 编码器报出的这些值改接过去。`moq_opus` 因此只在枚举列表里放 6 kbit/s，这个值不在该网格上。真正编码仍读 settings 里的 `bitrate`，默认 128。输入解码语义没改。
+
+## 重建
+
+这次没有改 Rust FFI、wire 或 `moq-ffi` 的 ABI。Android 如果仍钉在 `40f3b92d` 的原生库，不必为这个提交重编 JNI。要更新的是 OBS 插件本身，仍用 `sh/obs/macos-obs32.1.2.sh`。Ninja 加命令行工具也可以，只要传入 `-DOBS_MOQ_BUILDSPEC=buildspec.obs32.1.2.json`，并且不要升级 OBS 或 obs-deps。装进正在使用的 OBS 需要另一次维护许可。装上之后，还要用应用内 CA 完成一次握手并解出音画，才能说这条输入可用。
+
 ## 这次没有测的
 
 - macOS 编译、插件加载、OBS 出画、VideoToolbox 实帧。
+- 用应用内 CA 和订阅 token 对 `10.244.144.10` 的真实握手，以及解码后的音画。
 - 手机 Vivid、硬编帧复用、单次 PCM、硬解到 Surface。
 - 端到端延迟、弱网、断网重连、双机负载、证书轮换。
 - 用本树重新跑 IETF22 QUIC 环回。附件里的 `.hang` 成功和 `.msf` 失败仍是 CLI 0.14.17 的记录。
-- Opus、回传音画同步、旧 watchdog 是否只看 SRT。
+- 回传音画同步、旧 watchdog 是否只看 SRT。
+- 本环境没有 nix、libobs 和 uniffi-bindgen，所以没有跑 `just obs test` 那套链接 moq-ffi 的插件测试。

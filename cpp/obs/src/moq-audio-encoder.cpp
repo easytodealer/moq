@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "moq-audio-encoder.h"
+#include "moq-opus-bitrates.h"
 
 #include <obs-module.h>
 
@@ -172,6 +173,23 @@ bool Update(void *data, obs_data_t *settings)
 	return true;
 }
 
+// OBS 32.1.2 启动时对每个音频编码器调用 get_properties(NULL)，再读 bitrate。
+// 没有 get_bitrate。这里给出一个不在 ffmpeg_opus 网格上的列表项，避免简单输出改接编码器。
+// 解码输入不经过 moq_opus。
+obs_properties_t *GetProperties(void *)
+{
+	obs_properties_t *props = obs_properties_create();
+	obs_property_t *bitrate = obs_properties_add_list(props, "bitrate", "Bitrate", OBS_COMBO_TYPE_LIST,
+							  OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(bitrate, "6", MoqOpusStartupEnumerationKbps());
+	obs_property_t *preset =
+		obs_properties_add_list(props, "preset", "Preset", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(preset, "Low latency", "low_latency");
+	obs_property_list_add_string(preset, "Balanced", "balanced");
+	obs_property_list_add_string(preset, "Quality", "quality");
+	return props;
+}
+
 bool GetExtraData(void *data, uint8_t **extra_data, size_t *size)
 {
 	auto enc = static_cast<MoQAudioEncoder *>(data);
@@ -206,6 +224,7 @@ void register_moq_audio_encoder()
 	info.encode = Encode;
 	info.get_frame_size = GetFrameSize;
 	info.get_defaults = GetDefaults;
+	info.get_properties = GetProperties;
 	info.update = Update;
 	info.get_extra_data = GetExtraData;
 	info.get_audio_info = GetAudioInfo;
