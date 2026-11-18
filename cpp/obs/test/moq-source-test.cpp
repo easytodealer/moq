@@ -223,6 +223,14 @@ obs_property_t *obs_properties_add_text(obs_properties_t *, const char *, const 
 	return reinterpret_cast<obs_property_t *>(0x12);
 }
 
+obs_property_t *obs_properties_add_path(obs_properties_t *, const char *, const char *, enum obs_path_type, const char *,
+					const char *)
+{
+	return reinterpret_cast<obs_property_t *>(0x14);
+}
+
+void obs_property_set_long_description(obs_property_t *, const char *) {}
+
 void obs_source_output_video(obs_source_t *, const struct obs_source_frame *frame)
 {
 	if (!frame) {
@@ -759,12 +767,18 @@ int main()
 		void *source = createSource();
 		auto *ctx = static_cast<struct moq_source *>(source);
 		CHECK(!ctx->keylog);
-		CHECK(moq_source_client_config(ctx->keylog).quic.keylog != true);
+		std::string error;
+		auto plain = moq_source_client_config(ctx, error);
+		CHECK(plain && error.empty());
+		CHECK(plain->quic.keylog != true);
+		CHECK(plain->versions.empty());
 
 		g_settings.keylog = true;
 		g_info.update(source, settingsData());
 		CHECK(ctx->keylog);
-		CHECK(moq_source_client_config(ctx->keylog).quic.keylog == true);
+		auto logged = moq_source_client_config(ctx, error);
+		CHECK(logged && error.empty());
+		CHECK(logged->quic.keylog == true);
 		destroySource(source);
 	}
 	report("key log is opt-in");

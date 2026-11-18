@@ -2209,6 +2209,99 @@ mod tests {
 		assert!(matches!(result, Err(Error::Watch(_))));
 	}
 
+	/// The OBS source trusts only the PEM it was given (`system_roots = false`), so the
+	/// trust anchor is built by [`root_store`]. PEM decoding alone is not that check:
+	/// `30 03 30 01 00` is a certificate-shaped DER that OpenSSL's `x509` rejects, and
+	/// rustls must refuse it here rather than install it as a root.
+	#[test]
+	fn custom_root_store_rejects_certificates_openssl_rejects() {
+		fn pem(der: &[u8]) -> String {
+			const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+			let mut body = String::from("-----BEGIN CERTIFICATE-----\n");
+			let mut acc = 0u32;
+			let mut bits = 0;
+			let mut col = 0;
+			for byte in der {
+				acc = (acc << 8) | u32::from(*byte);
+				bits += 8;
+				while bits >= 6 {
+					bits -= 6;
+					body.push(TABLE[((acc >> bits) & 0x3f) as usize] as char);
+					col += 1;
+					if col == 64 {
+						body.push('\n');
+						col = 0;
+					}
+				}
+			}
+			if bits > 0 {
+				body.push(TABLE[((acc << (6 - bits)) & 0x3f) as usize] as char);
+			}
+			if !body.ends_with('\n') {
+				body.push('\n');
+			}
+			body.push_str("-----END CERTIFICATE-----\n");
+			body
+		}
+
+		let synthetic: &[u8] = &[0x30, 0x03, 0x30, 0x01, 0x00];
+		let non_cert: &[u8] = &[0x30, 0x03, 0x02, 0x01, 0x01];
+		let (real_ca, _, _, _, _) = signed_certificates();
+		let real_der = {
+			let loaded = {
+				let dir = tempfile::TempDir::new().unwrap();
+				let path = dir.path().join("ca.pem");
+				std::fs::write(&path, &real_ca).unwrap();
+				read_roots(&[path]).unwrap()
+			};
+			loaded[0].as_ref().to_vec()
+		};
+		let truncated = &real_der[..real_der.len() / 2];
+
+		let cases = [
+			("synthetic", pem(synthetic)),
+			("truncated", pem(truncated)),
+			("non-cert", pem(non_cert)),
+			(
+				"mixed",
+				format!(
+					"{}-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----\n",
+					pem(synthetic)
+				),
+			),
+		];
+		for (name, file) in cases {
+			let dir = tempfile::TempDir::new().unwrap();
+			let path = dir.path().join("root.pem");
+			std::fs::write(&path, &file).unwrap();
+			let der = read_roots(std::slice::from_ref(&path))
+				.unwrap_or_else(|err| panic!("{name}: PEM decode should yield the certificate block, got {err}"));
+			let err = root_store(&der).unwrap_err();
+			assert!(matches!(err, Error::AddRoot(_)), "{name}: {err:?}");
+			let text = err.to_string();
+			assert_eq!(text, "failed to add root certificate", "{name}: {text}");
+			assert!(!text.contains("BEGIN CERTIFICATE"), "{name}");
+			assert!(!text.contains("PRIVATE KEY"), "{name}");
+			assert!(!text.contains(&path.display().to_string()), "{name}");
+			let verifier = Connect::build_root_server_verifier(&der, false, &crypto::provider().unwrap());
+			assert!(verifier.is_err(), "{name}: system_roots=false still built a verifier");
+		}
+
+		let dir = tempfile::TempDir::new().unwrap();
+		let path = dir.path().join("key.pem");
+		std::fs::write(&path, "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----\n").unwrap();
+		let err = read_roots(&[path.clone()]).unwrap_err();
+		assert!(matches!(err, Error::EmptyRoots(_)));
+		assert!(!err.to_string().contains("MIIB"));
+
+		let dir = tempfile::TempDir::new().unwrap();
+		let path = dir.path().join("ca.pem");
+		std::fs::write(&path, &real_ca).unwrap();
+		let der = read_roots(&[path]).unwrap();
+		root_store(&der).unwrap();
+		Connect::build_root_server_verifier(&der, false, &crypto::provider().unwrap()).unwrap();
+	}
+
 	/// Disabling verification cannot be combined with trust material that it would
 	/// otherwise ignore.
 	#[test]

@@ -1654,6 +1654,14 @@ async fn test_msf_catalog_roundtrip() {
 	assert_eq!(video.coded_width, Some(1280));
 	assert_eq!(video.coded_height, Some(720));
 	assert!(matches!(video.container, Container::Cmaf { .. }));
+	// CLI 0.14.17 的 MSF 消费者把 CMAF description 留空，导出把长度前缀样本当 Annex B。
+	let description = video.description.as_ref().expect("CMAF 必须带上 avcC");
+	assert!(!description.is_empty());
+	assert_eq!(description[0], 1, "avcC configurationVersion");
+	assert!(
+		super::super::source::build_video_transform(video).is_none(),
+		"已有 avcC 时不得再安装 Annex B 变换"
+	);
 
 	let audio = catalog.audio.renditions.values().next().unwrap();
 	assert_eq!(audio.codec.to_string(), "mp4a.40.2");

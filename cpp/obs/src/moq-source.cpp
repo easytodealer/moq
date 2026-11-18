@@ -34,6 +34,7 @@ extern "C" {
 
 #include "moq-implementation.h"
 #include "moq-source.h"
+#include "moq-source-auth.h"
 #include "moq-url.h"
 #include "moq-worker.h"
 #include "logger.h"
@@ -195,6 +196,10 @@ struct moq_source {
 	std::string url;
 	std::string broadcast;
 	bool keylog = false;
+	// 路径，不是证书或 token 正文。token 只在拨号时读入。
+	std::string tls_root;
+	std::string token_file;
+	std::string server_name;
 
 	// The current connection, or null while disconnected. A continuation for any
 	// other connection is stale and returns without touching anything.
@@ -321,17 +326,28 @@ static void moq_source_update(void *data, obs_data_t *settings)
 
 	const char *url_value = obs_data_get_string(settings, "url");
 	const char *broadcast_value = obs_data_get_string(settings, "broadcast");
+	const char *root_value = obs_data_get_string(settings, "tls_root");
+	const char *token_value = obs_data_get_string(settings, "token_file");
+	const char *name_value = obs_data_get_string(settings, "tls_server_name");
 	const std::string url = url_value ? url_value : "";
 	const std::string broadcast = broadcast_value ? broadcast_value : "";
+	const std::string tls_root = root_value ? root_value : "";
+	const std::string token_file = token_value ? token_value : "";
+	const std::string server_name = name_value ? name_value : "";
 	const bool keylog = obs_data_get_bool(settings, "quic_keylog");
 
 	bool settings_changed;
 	{
 		std::lock_guard<std::mutex> lock(ctx->mutex);
-		settings_changed = url != ctx->url || broadcast != ctx->broadcast || keylog != ctx->keylog;
+		settings_changed = url != ctx->url || broadcast != ctx->broadcast || keylog != ctx->keylog ||
+				   tls_root != ctx->tls_root || token_file != ctx->token_file ||
+				   server_name != ctx->server_name;
 		ctx->url = url;
 		ctx->broadcast = broadcast;
 		ctx->keylog = keylog;
+		ctx->tls_root = tls_root;
+		ctx->token_file = token_file;
+		ctx->server_name = server_name;
 	}
 
 	// Check if new settings are valid for connection
@@ -357,6 +373,9 @@ static void moq_source_get_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "url", "http://localhost:4443");
 	obs_data_set_default_string(settings, "broadcast", "obs/test");
 	obs_data_set_default_bool(settings, "quic_keylog", false);
+	obs_data_set_default_string(settings, "tls_root", "");
+	obs_data_set_default_string(settings, "token_file", "");
+	obs_data_set_default_string(settings, "tls_server_name", "");
 }
 
 static obs_properties_t *moq_source_properties(void *data)
@@ -370,6 +389,18 @@ static obs_properties_t *moq_source_properties(void *data)
 	// Writes TLS session secrets to the file SSLKEYLOGFILE names, to decrypt a packet
 	// capture; without SSLKEYLOGFILE the dial fails.
 	obs_properties_add_bool(props, "quic_keylog", "TLS key log");
+	// 留空则沿用旧的库默认拨号。填了 CA 或 token 文件就只信任这份 PEM，
+	// 协议钉在 moq-transport-22，并关闭 WebSocket。token 正文不进场景。
+	obs_property_t *root = obs_properties_add_path(props, "tls_root", "App-local CA (PEM)", OBS_PATH_FILE,
+						       "PEM (*.pem *.crt);;All Files (*)", nullptr);
+	obs_property_set_long_description(root, "Trust this CA file only. System roots and insecure mode stay off.");
+	obs_property_t *token = obs_properties_add_path(props, "token_file", "Subscribe token file", OBS_PATH_FILE,
+							"Token (*.jwt *.txt);;All Files (*)", nullptr);
+	obs_property_set_long_description(
+		token, "Owner-readable file with one subscribe JWT. It is not stored in the scene or the log.");
+	obs_property_t *server = obs_properties_add_text(props, "tls_server_name", "Server name override", OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(
+		server, "Empty checks the URL host, including an IP SAN. A value replaces that check.");
 
 	return props;
 }
@@ -384,12 +415,30 @@ static void moq_source_fail_locked(struct moq_source *ctx)
 	moq_source_blank_video(ctx);
 }
 
-// The source dials with the defaults, plus the TLS key log when the user opts in.
-static moq::ClientConfig moq_source_client_config(bool keylog)
+// 旧源只带 keylog。严格订阅在 Prepare 里失败时不拨号。
+static std::optional<moq::ClientConfig> moq_source_client_config(const moq_source *ctx, std::string &error)
 {
+	MoQSourceAuth::Dial dial = MoQSourceAuth::Prepare(MoQSourceAuth::Input{
+		ctx->url, ctx->broadcast, ctx->tls_root, ctx->token_file, ctx->server_name});
+	if (!dial) {
+		error = dial.error;
+		return std::nullopt;
+	}
 	moq::ClientConfig config;
-	config.quic.keylog = keylog;
+	config.quic.keylog = ctx->keylog;
 	config.implementation = MoQImplementation();
+	if (dial.secure) {
+		config.versions = dial.versions;
+		config.websocket.enabled = false;
+		config.tls.roots = {dial.tls_root};
+		config.tls.system_roots = false;
+		config.tls.insecure = false;
+		if (dial.server_name)
+			config.tls.host_name = dial.server_name->c_str();
+		std::string token = dial.token.take();
+		config.tokens = {std::move(token)};
+	}
+	error.clear();
 	return config;
 }
 
@@ -404,9 +453,16 @@ static void moq_source_reconnect(struct moq_source *ctx)
 	auto conn = std::make_shared<Connection>();
 	conn->url = ctx->url;
 	conn->broadcast = ctx->broadcast;
+	// URL 的 path 与 broadcast 各用一次：path 留在 URL 里，broadcast 只传给 follow。
+	std::string config_error;
+	auto config = moq_source_client_config(ctx, config_error);
+	if (!config) {
+		LOG_ERROR("MoQ source refused to connect: %s", config_error.c_str());
+		return;
+	}
 	// Neither origin side is wired, so the session's consume side carries the
 	// remote's announcements.
-	auto client = moq::Client::init(moq_source_client_config(ctx->keylog));
+	auto client = moq::Client::init(*config);
 	if (!client) {
 		// Already disconnected and blanked above.
 		LOG_ERROR("Failed to create MoQ client: %s", client.error().to_string().c_str());

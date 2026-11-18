@@ -316,6 +316,8 @@ int main()
 	CHECK(strcmp(g_info.id, "moq_opus") == 0);
 	CHECK(strcmp(g_info.codec, "opus") == 0);
 	CHECK(g_info.type == OBS_ENCODER_AUDIO);
+	// 不提供 get_properties。OBS 32.1.2 因此会打码率枚举告警，但不会改简单输出的码率表。
+	CHECK(g_info.get_properties == nullptr);
 	// Hidden from OBS's encoder lists until Use MoQ encoders offers it.
 	CHECK(g_info.caps & OBS_ENCODER_CAP_INTERNAL);
 	printf("registers an internal Opus encoder: ok\n");
