@@ -91,7 +91,9 @@ OBS 合成画面是新像素，必须再编码。插件在认识的编码器上�
 
 三个新属性都空着时，源保持这次改动之前的库默认：可以协商 moq-lite，WebSocket 仍按库默认，也不要求本地 CA。旧的 `url` / `broadcast` / `quic_keylog` 场景因此不用改。
 
-任一有值就进入严格订阅。缺另一项、不是 `https`、URL 自带 `jwt` 或 userinfo、PEM 解不出 X.509 证书或夹着私钥、token 文件空、不是 JWT、不是属主且模式含组/其他读、是符号链接、读的过程中变了、超过 16 KiB、未验签载荷写了 publish，都直接拒绝，不拨号。通过时版本只有 `moq-transport-22`，WebSocket 关闭，`insecure` 和系统根都是关，token 只放进 `ClientConfig::tokens` 一次。URL 的 path 和 `broadcast` 不拼接。`tls_server_name` 为空就校验 URL 主机；填了就只校验这一个名字。IP 覆盖名必须等于 URL 主机。通配符不行。
+任一有值就进入严格订阅。缺另一项、不是 `https`、URL 自带 `jwt` 或 userinfo、PEM 里没有证书块或夹着私钥、token 文件空、不是 JWT、不是属主且模式含组/其他读、是符号链接、读的过程中变了、超过 16 KiB、未验签载荷写了 publish，都直接拒绝，不拨号。通过时版本只有 `moq-transport-22`，WebSocket 关闭，`insecure` 和系统根都是关，token 只放进 `ClientConfig::tokens` 一次。URL 的 path 和 `broadcast` 不拼接。`tls_server_name` 为空就校验 URL 主机；填了就只校验这一个名字。IP 覆盖名必须等于 URL 主机。通配符不行。
+
+C++ 这段只筛 PEM 外形。`30 03 30 01 00` 这种 openssl 拒绝的字节也会通过筛查。`system_roots=false` 时，信任锚由 `moq-tokio` 的 `rustls::RootCertStore::add` 建立。加不进去则 `Client::init` 失败，错误是 `failed to add root certificate`，不含证书正文和路径。这不是一次真实握手。
 
 威胁模型：场景 JSON 不放 JWT。错误和描述字符串不带 token 正文，也不带 token 文件路径。打开用 `O_NOFOLLOW`，权限看的是这个 fd 的 `fstat`，所以路径在打开之后被换成别的文件不会读到新 inode。这不是钥匙串。能读该文件的进程仍能读到 token。载荷里的 publish/subscribe 检查没有验签，只用来拒绝明显配错的文件；中继仍要验证签名和授权。握手和出画没有在这台云主机上做过。
 

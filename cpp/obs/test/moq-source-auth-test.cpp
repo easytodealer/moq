@@ -202,11 +202,14 @@ int main()
 		CHECK(dial.error.find(dir) == std::string::npos);
 	}
 	{
-		const std::string junk = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
-		WriteFile(dir + "/junk.pem", junk, 0644);
-		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", dir + "/junk.pem", token_path, ""});
-		CHECK(!dial);
-		CHECK(dial.error.find("certificate") != std::string::npos);
+		// 30 03 30 01 00。openssl x509 拒绝。这里只筛 PEM，不把它当成已校验的根。
+		const std::string synthetic = "-----BEGIN CERTIFICATE-----\nMAMwAQA=\n-----END CERTIFICATE-----\n";
+		WriteFile(dir + "/synthetic.pem", synthetic, 0644);
+		Dial dial = Prepare(Input{"https://10.244.144.10:4443", "room", dir + "/synthetic.pem", token_path, ""});
+		CHECK(dial);
+		CHECK(dial.secure);
+		CHECK(dial.insecure == false);
+		CHECK(dial.system_roots && *dial.system_roots == false);
 	}
 	{
 		WriteFile(dir + "/key.pem", "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n", 0600);

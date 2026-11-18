@@ -408,59 +408,35 @@ inline bool ReadFile(const std::string &path, bool secret, std::string &body, st
 	return true;
 }
 
-inline bool DerSequence(const std::string &der)
-{
-	if (der.size() < 2 || static_cast<unsigned char>(der[0]) != 0x30)
-		return false;
-	size_t hdr = 2;
-	size_t len = static_cast<unsigned char>(der[1]);
-	if (static_cast<unsigned char>(der[1]) & 0x80) {
-		const size_t nbytes = static_cast<unsigned char>(der[1]) & 0x7f;
-		if (nbytes == 0 || nbytes > 3 || der.size() < 2 + nbytes)
-			return false;
-		len = 0;
-		for (size_t i = 0; i < nbytes; i++)
-			len = (len << 8) | static_cast<unsigned char>(der[2 + i]);
-		hdr = 2 + nbytes;
-	}
-	if (hdr + len != der.size() || len < 2)
-		return false;
-	return static_cast<unsigned char>(der[hdr]) == 0x30;
-}
-
-inline bool PemHasCertificate(const std::string &body)
+// 只确认有一段证书 PEM，并且文件里没有私钥块。
+// 不解析 X.509。openssl 拒绝的 30 03 30 01 00 也会通过这里。
+// system_roots=false 时，信任锚由 moq-tokio 的 rustls RootCertStore::add 建立；
+// Client::init 失败则不拨号。
+inline bool PemHasCertificateBlock(const std::string &body)
 {
 	if (body.find("PRIVATE KEY") != std::string::npos)
 		return false;
 	const std::string begin = "-----BEGIN CERTIFICATE-----";
 	const std::string end = "-----END CERTIFICATE-----";
-	size_t cursor = 0;
-	bool any = false;
-	while (cursor < body.size()) {
-		const size_t at = body.find(begin, cursor);
-		if (at == std::string::npos)
-			return any;
-		const size_t stop = body.find(end, at + begin.size());
-		if (stop == std::string::npos)
+	const size_t at = body.find(begin);
+	if (at == std::string::npos)
+		return false;
+	const size_t stop = body.find(end, at + begin.size());
+	if (stop == std::string::npos)
+		return false;
+	std::string b64;
+	for (size_t i = at + begin.size(); i < stop; i++) {
+		const unsigned char c = static_cast<unsigned char>(body[i]);
+		if (std::isspace(c))
+			continue;
+		if (c == '=')
+			continue;
+		if (B64(static_cast<char>(c)) < 0)
 			return false;
-		std::string b64;
-		for (size_t i = at + begin.size(); i < stop; i++) {
-			const unsigned char c = static_cast<unsigned char>(body[i]);
-			if (std::isspace(c))
-				continue;
-			if (c == '=')
-				continue;
-			if (B64(static_cast<char>(c)) < 0)
-				return false;
-			b64.push_back(static_cast<char>(c));
-		}
-		std::string der;
-		if (!Base64Url(b64, der) || !DerSequence(der))
-			return false;
-		any = true;
-		cursor = stop + end.size();
+		b64.push_back(static_cast<char>(c));
 	}
-	return any;
+	std::string der;
+	return Base64Url(b64, der);
 }
 
 inline std::string HostOf(const std::string &url, std::string &error)
@@ -627,9 +603,9 @@ inline Dial Prepare(const Input &in)
 	std::string pem;
 	if (!ReadFile(in.tls_root, false, pem, dial.error, "CA PEM"))
 		return dial;
-	if (!PemHasCertificate(pem)) {
+	if (!PemHasCertificateBlock(pem)) {
 		pem.assign(pem.size(), '\0');
-		dial.error = "CA PEM does not contain a certificate";
+		dial.error = "CA PEM has no certificate block";
 		return dial;
 	}
 	pem.assign(pem.size(), '\0');
