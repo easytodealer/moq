@@ -1104,6 +1104,23 @@ mod tests {
 		assert_eq!(out.as_ref(), expected.as_ref());
 	}
 
+	/// 4 字节长度前缀的 avc1 样本不是 Annex B。
+	/// moq-cli 0.14.17 在 `.msf` 上把 CMAF 样本交给 [`Avc1::transform`]：
+	/// NAL 长度落在 512..=65535 且第三字节不是 0 或 1 时，报
+	/// `h264: annexb: invalid Annex B start code`。
+	#[test]
+	fn length_prefixed_sample_is_not_annex_b() {
+		let nal = vec![0x65u8; 512];
+		let mut payload = Vec::with_capacity(4 + nal.len());
+		payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+		payload.extend_from_slice(&nal);
+		let err = Avc1::new().transform(bytes::Bytes::from(payload)).unwrap_err();
+		assert!(matches!(
+			err,
+			Error::Annexb(crate::codec::annexb::Error::InvalidStartCode)
+		));
+	}
+
 	fn decode_avcc(bytes: &Bytes) -> mp4_atom::Avcc {
 		use mp4_atom::Atom;
 		mp4_atom::Avcc::decode_body(&mut std::io::Cursor::new(bytes.as_ref())).unwrap()

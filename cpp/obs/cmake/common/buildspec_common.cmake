@@ -118,7 +118,23 @@ endfunction()
 
 # _check_dependencies: Fetch and extract pre-built OBS build dependencies
 function(_check_dependencies)
-  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/buildspec.json" buildspec)
+  # 默认仍是 buildspec.json（OBS 32.2.2 / 当前 obs-deps）。
+  # OBS_MOQ_BUILDSPEC 只接受源码目录里的 buildspec*.json，用来锁 OBS 32.1.2。
+  set(_buildspec_file "buildspec.json")
+  if(DEFINED OBS_MOQ_BUILDSPEC AND NOT OBS_MOQ_BUILDSPEC STREQUAL "")
+    set(_buildspec_file "${OBS_MOQ_BUILDSPEC}")
+  endif()
+  if(NOT _buildspec_file MATCHES "^buildspec(\\.[A-Za-z0-9_-]+)*\\.json$")
+    message(
+      FATAL_ERROR
+      "OBS_MOQ_BUILDSPEC must name a buildspec*.json file in the plugin source directory"
+    )
+  endif()
+  set(_buildspec_path "${CMAKE_CURRENT_SOURCE_DIR}/${_buildspec_file}")
+  if(NOT EXISTS "${_buildspec_path}")
+    message(FATAL_ERROR "dependency spec not found: ${_buildspec_path}")
+  endif()
+  file(READ "${_buildspec_path}" buildspec)
 
   string(JSON dependency_data GET ${buildspec} dependencies)
 

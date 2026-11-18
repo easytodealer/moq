@@ -1,0 +1,38 @@
+{
+	"dependencies": {
+		"obs-studio": {
+			"version": "32.1.2",
+			"baseUrl": "https://github.com/obsproject/obs-studio/archive/refs/tags",
+			"label": "OBS sources",
+			"hashes": {
+				"macos": "b4a59410cddb46d0e31df1ee13b8ec66f30862d7e980c1a8c4e3b5d16fae6053"
+			}
+		},
+		"prebuilt": {
+			"version": "2025-08-23",
+			"baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
+			"label": "Pre-Built obs-deps",
+			"hashes": {
+				"macos": "9403bb43fb0a9bb215739a5659ca274fe884dbbbcd22bd9ca781c961fb041c42"
+			}
+		},
+		"qt6": {
+			"version": "2025-08-23",
+			"baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
+			"label": "Pre-Built Qt6",
+			"hashes": {
+				"macos": "990f11638b80a4509e14e8c315f6e4caa0861e37fcd3113a256fbff835ffca29"
+			}
+		}
+	},
+	"platformConfig": {
+		"macos": {
+			"bundleId": "dev.montevideotech.obs-moq"
+		}
+	},
+	"name": "obs-moq",
+	"displayName": "MOQ for OBS",
+	"author": "Montevideo Tech",
+	"website": "https://montevideotech.dev",
+	"email": "emil@qualabs.com"
+}

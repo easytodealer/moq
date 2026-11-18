@@ -19,6 +19,10 @@ just obs setup
 just obs build
 ```
 
+OBS 32.1.2 on Apple Silicon cannot load a plugin built from the default spec
+(FFmpeg 62 / Qt 6.11.1). Use `sh/obs/macos-obs32.1.2.sh` and
+[`OBS-32.1.2.md`](OBS-32.1.2.md). That path does not change `buildspec.json`.
+
 Licensed under GPL-2.0-or-later (see [LICENSE](LICENSE)), separate from the rest of the
 repository, because it links OBS.
 
